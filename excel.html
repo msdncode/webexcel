@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<head>
+	<title>产品管理</title> 
+	<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+	<link type="text/css" rel="stylesheet" href="css/main.css" />
+	<script type="text/javascript" src="js/jquery-3.2.1.min.js"></script>
+	<script type="text/javascript" src="js/clipboard.min.js"></script>
+	<script type="text/javascript">var FORMHASH='4cf02ba2'</script>
+	<script type="text/javascript">
+		$(document).ready(function(){
+
+			var _AFRAUI_EDITABLE_TEXT = null;
+
+			//编辑器---------------------------------------------------------------------------------------------
+			function edit_start(obj){
+				//if(typeof(obj)=='object' && obj.attr && obj.attr('editable')=='true'){
+					_AFRAUI_EDITABLE_TEXT = obj.attr('contenteditable', 'true').addClass('editing').focus().text();					
+				//}
+			}
+
+			function edit_end(obj, url, kId, vId, data){
+				obj.removeAttr('contenteditable').removeClass('editing');
+				var params = {formhash: FORMHASH};
+				if($.isNumeric(kId)){data=vId;vId=kId;kId='id';}
+				params[kId] = vId;
+				if(!data || typeof(data)=='string'){
+					params['_key'] =  obj.attr('name') || 'id';
+					params['_val'] = (data || obj.html()).replace(/<br>/ig,"\n").replace(/<[^>]+>/g,'');;
+					if(_AFRAUI_EDITABLE_TEXT==params['_val']){return;}
+				}
+				else{
+					$.extend(params, data);
+				}
+				$.post(url, params, function(rv){if(rv.code!=1)showError('数据提交错误...')}, 'json');
+			}
+
+			//Grid初始化------------------------------------------------------------------------------------------
+			(function($){
+ 				var grid      = null;//表格根节点
+				var option    = null;//参数
+ 				var grip      = null;//调整大小:虚拟线
+				var drag      = null;//调整大小:表头单元格
+				var _index    = {};  //列号与列索引关联
+				var FC = null;//当前焦点单元格
+				var SA	      = null;//选中的区域, selectArea
+				var SD 	  = null;//拖动角点时扩大选区, selectAreaDrag
+				var onMmCell  = null;//移动中的鼠标, on_mousemove_cell
+				var FV        = null;//forfox与Chrome补差
+				var MD_which  = 0   ;//鼠标单击的是哪个按键, mouse_down_which
+
+				var init = function(parent, options){	
+					option = options;
+					option.data = _addDataHeader(option.data);
+					createGrid(parent);
+					_fv();
+				}
+
+				//公共操作函数==============================================================================================
+				var _fv = function(){
+					if(FV===null){
+						var th = grid.find('th:first');
+						FV = th.innerHeight()==th.outerHeight() ? 0 : -1;
+					}
+				}
+
+				function _addDataHeader(data){
+					for(kRow in data){
+						var i=0; data[0] = {};
+						for(kCol in data[kRow]){
+							data[0][i] = String.fromCharCode(65+i++);
+						}
+						break;
+					}
+					return data;
+				}
+
+				function Me(cell){
+					cell = $(cell);
+					if(cell.length==0){return cell;}
+					var tb = cell.closest('table');
+					var os = cell.offset();
+					cell.col   = parseInt(tb.find('>thead>tr:first-child>th:eq('+cell.index()+')').attr('col') || -1);
+					cell.row   = parseInt(cell.parent().attr('row') || -1);
+					cell.left  = os.left - grid.ox;
+					cell.top   = os.top  - grid.oy;
+					cell.right = cell.left + cell.width();
+					cell.bottom= cell.top  + cell.height();
+					cell.tid   = grid.table.index(tb);
+					cell.h     = cell.bottom - cell.top;
+					cell.w     = cell.right  - cell.left;
+					return cell;
+				}
+
+				function GetCell(row, col){
+					var cell = grid.table.find('>tbody>tr[row='+row+']').find('>th,td').eq(_index[col]);
+					return Me(cell);
+				}
+
+				function GetArea(cell1, cell2, refresh){
+					if(!cell2){
+						var lt = GetCell(cell1.t, cell1.l);
+						var rb = GetCell(cell1.b, cell1.r);
+						return GetArea(lt, rb, refresh);
+					}
+					else{
+						if(refresh){
+							cell1 = Me(cell1);
+							cell2 = Me(cell2);
+						}
+						return unionArea(cell1, cell2);
+					}
+				}
+
+				function unionArea(area1, area2){
+					var area = [];
+					area.l      = Math.min(area1.col||area1.l||0,   area2.col||area2.l||0);
+					area.r      = Math.max(area1.col||area1.r||0,   area2.col||area2.r||0);
+					area.t      = Math.min(area1.row||area1.t||0,   area2.row||area2.t||0);
+					area.b      = Math.max(area1.row||area1.b||0,   area2.row||area2.b||0);
+					area.left   = Math.min(area1.left,  area2.left);
+					area.right  = Math.max(area1.right, area2.right);
+					area.top    = Math.min(area1.top,   area2.top);
+					area.bottom = Math.max(area1.bottom,area2.bottom);
+				    area.h      = area.bottom - area.top;
+				    area.w      = area.right  - area.left;
+				    area.count  = (area.r - area.l + 1) * (area.b - area.t + 1);
+					return area;
+				}
+
+				function inArea(ox, oy, area){
+					if(!area){
+						var cell = ox, area = oy;
+						return area.left-1 <= cell.left && cell.right <= area.right && area.top <= cell.top && cell.bottom <= area.bottom;
+					}
+					else{
+						return area.left <= ox && ox <= area.right && area.top <= oy && oy <= area.bottom;
+					}
+				}
+
+				//表格操作================================================================================================
+
+				function createGrid(parent)
+				{
+					grid = $('<div class="w3conline"><div class="wo-sp"><div class="wo-vp"><div class="wo-vt"><table class="wo-tb tb-tl"><thead><tr></tr></thead><tbody></tbody></table></div><div class="wo-vt"><table class="wo-tb tb-tr"><thead><tr></tr></thead><tbody></tbody></table></div></div></div><div class="wo-sp"><div class="wo-vp"><div class="wo-vt"><table class="wo-tb tb-ml"><thead><tr></tr></thead><tbody></tbody></table></div><div class="wo-vt"><table class="wo-tb tb-mr"><thead><tr></tr></thead><tbody></tbody></table></div></div></div><div class="wo-csz"><div></div></div><div class="wo-rsz"><div></div></div><div class="wo-sv"><div></div></div>'+(option.isCorner?'<div class="wo-corner"></div>':'')+'<div class="wo-fs-cell"></div><div class="wo-fs-select"></div><div class="wo-fs-corner"></div><div class="wo-fs-top"></div><div class="wo-fs-left"></div><div class="wo-ctm"></div></div>').appendTo(parent);
+					grid.table = grid.find('table.wo-tb');
+					var os = grid.offset();
+					grid.ox = os.left;
+					grid.oy = os.top;
+
+					cloneTable();
+					createContextmenu();
+
+					grid.find('.wo-csz,.wo-rsz').bind('mousedown.grap', onGripMousedown);
+					grid.find('.wo-corner').bind('mousedown.edit', onCornerMousedown);
+					grid.find('.wo-sv').on('scroll', function(){grid.table.filter(':odd' ).css({left:-$(this).scrollLeft()});setFocus('H');});
+					grid.find('.wo-sp:last').on('scroll', function(){setFocus('V');});
+				}
+ 
+				function cloneTable()//克隆,一分四
+				{
+					var hd = grid.table.find('>thead>tr').empty().append('<th></th>');
+					hd.find('>th').filter(':even' ).attr('col', 0);
+					hd[true] = hd.filter(':even');
+					hd[false]= hd.filter(':odd');
+					var bd   = grid.table.find('>tbody').empty();
+					var iRow = 0;
+					for(var kRow in option.data){
+						var row= option.data[kRow];
+						var n  = iRow<=option.fixedTop ? 0 : 2;
+						var tr = {};
+						tr[true] = $('<tr></tr>').attr('row', iRow).appendTo(bd.eq(n));
+						tr[false]= $('<tr></tr>').attr('row', iRow).appendTo(bd.eq(n+1));
+						$('<th></th>').css('height', option.rowHeight).appendTo(tr[false]).clone().appendTo(tr[true]).text(iRow||'');
+
+						var iCol = 0;
+						for(var kCol in row){
+							if(iRow==0){
+								$('<th></th>').appendTo(hd[iCol<option.fixedLeft]).attr('col', iCol+1);
+								$('<th></th>').appendTo(tr[iCol<option.fixedLeft]).text(row[kCol]);
+							}else{
+								$('<td></td>').appendTo(tr[iCol<option.fixedLeft]).text(row[kCol]);
+							}
+							iCol++;
+						}
+						iRow++;
+					}
+					grid.colCount = iCol+1;
+					grid.rowCount = iRow;
+
+					syncSize();
+
+					var hd  = grid.find('tbody>tr>th:first');
+					grid.hdHeight = hd.outerHeight();
+					grid.hdWidth  = hd.outerWidth();
+
+					//调整表格宽高
+					grid.find('tbody>tr>th:not(:first)').bind('mousemove.grap', onGripMousemove);
+
+					//单元格单击
+					grid.table.find('tr>th,tr>td').bind('mousedown.edit', onMousedown);
+
+					//编辑事件
+					grid.find('tbody>tr>th,tbody>tr>td').bind('mousemove.edit', onMousemove);
+					grid.bind('mouseup.edit', onMouseup);
+				} 
+
+				function createContextmenu()//右键菜单
+				{
+					if(option.contextdata==null)return false;
+					var cm = grid.find('.wo-ctm');
+					for(var id in option.contextdata){$('<li></li>').attr('id', id).html(option.contextdata[id]).appendTo(cm);}
+					grid.table.find('tr>th,tr>td').bind('contextmenu.ctm', onContextmenu);
+					grid.table.bind('mousedown', cm, function(){cm && cm.is(':visible') && cm.hide();})
+					cm.find('li').bind('click', cm, function(e) {
+						var me = Me(this);
+						console.log(e)
+						cm.hide();
+					});
+				}
+
+				function syncSize()//同步宽度高度
+				{	
+					var width  = option.width;
+					var height = option.height;
+					//------------------------------------------------------------------
+					var hdt = grid.table.slice(0,2).find('>thead>tr>th');
+					var hdm = grid.table.slice(2,4).find('>thead>tr>th');
+					hdt.each(function(i, el){
+						el = $(el);
+						var w = Math.max(hdm.eq(i).outerWidth(), el.outerWidth(), option.minColWidth); 
+						el.outerWidth(w);
+						hdm.eq(i).outerWidth(w);
+						_index[el.attr('col')||-1] = i;
+					});
+					//------------------------------------------------------------------
+					var Ht = grid.table.eq(0).outerHeight();
+					var Hm = grid.table.eq(2).outerHeight();
+					var Wl = grid.table.eq(0).innerWidth();
+					var Wr = grid.table.eq(1).innerWidth();
+ 
+					grid.css({width: width, height: height});
+					var sp = grid.find('>.wo-sp');
+					sp.find('>.wo-vp').width(width);
+					sp.eq(0).css({width: width-17});	
+					sp.eq(1).css({height:height-Ht-17, width: width});
+					grid.table.filter(':even').innerWidth(Wl).parent().innerWidth(Wl);
+					grid.table.filter(':odd' ).innerWidth(Wr).parent().innerWidth(width-Wl-17);
+ 					grid.find('>.wo-sv').css({left: Wl, top: height-18, width: width-Wl-17}).children().css({width: Wr, height: Hm});
+				}
+
+				//调整表格大小================================================================================================
+
+				var onGripMousemove = function(e){
+					if(grip){
+	         			if(drag.mode=='col'){
+							grip.css('left', Math.max(e.pageX - grid.ox, drag.left + option.minColWidth) + FV);
+	        			}
+	        			else if(drag.mode=='row'){
+							grip.css('top',  Math.max(e.pageY - grid.oy, drag.top + option.minRowHeight) + FV);    
+	        			}
+					}
+					else{
+						drag = Me(this);
+						drag.tw= drag.closest('table').outerWidth() - drag.width();
+						var ox = e.pageX - grid.ox;
+	        			var oy = e.pageY - grid.oy;
+
+						if(drag.col>0 && Math.abs(drag.right - ox) < 5){//top
+							grid.find('.wo-csz').css('left', drag.right).show();
+							drag.mode = 'col';
+						}
+						else if(drag.row>0 && Math.abs(drag.bottom - oy) < 5){//left
+							grid.find('.wo-rsz').css('top', drag.bottom).show();
+							drag.mode = 'row';
+						}
+						else{
+							drag.mode = null;
+						}
+					}
+					e.stopPropagation();
+				}
+
+				var onGripMousedown = function(e){
+					if(drag){
+						grip = $(this);
+						grip.find('>div').addClass('wo-ln');
+						$('head').append('<style type="text/css" grid="true">*{cursor:'+drag.mode+'-resize'+'!important}</style>');
+						$(document).bind('mouseup.grap', onGrapMouseup);
+					}
+				}
+
+				var onGrapMouseup = function(e){
+					if(drag && drag.mode && grip){
+						FC = Me(FC);
+	        			if(drag.mode=='col'){
+	        				drag.w = Math.max(grip.offset().left - drag.left - grid.ox + 3, option.minColWidth);
+							grid.table.find('th[col='+drag.col+']').width(drag.w );
+							grid.table.filter(drag.tid==0?':even':':odd').innerWidth(drag.tw + drag.w);
+							var Wl = grid.table.eq(0).innerWidth();
+							var vt = grid.find('.wo-vt');
+							vt.filter(':even').width(Wl);
+							vt.filter(':odd' ).width(option.width - Wl - 16);
+							grid.find('.wo-sv').css({left:Wl, width:option.width-Wl-17}).find('>div').width(grid.table.eq(3).innerWidth());
+							setFocus('H');
+	        			}
+	        			else if(drag.mode=='row'){
+	        				var nRow = drag.parent().attr('row');
+	        				drag.h = Math.max(grip.offset().top  - drag.top - grid.oy + 3, option.minRowHeight);
+							grid.find('tr[row='+nRow+']').find('th:first').height(drag.h);
+							var Ht = grid.table.eq(0).outerHeight();
+							var sp = grid.find('>.wo-sp:eq(1)').css({height:option.height-Ht-17});
+							setFocus('V');
+	        			}
+						grip.find('div').removeClass('wo-ln');
+					}
+
+					$('head>style[grid]').remove(); 
+					$(document).unbind('mouseup.grap');
+					drag = grip = null;
+				}
+
+				//选区操作================================================================================================
+				function setCornerPos(cell){
+					if(cell===null){
+						grid.find('.wo-corner').hide();
+					}
+					else{
+						if(!SA)return;
+						if(!cell)cell=SA;
+						if(option.width-17 < cell.right+FV){
+							grid.find('.wo-corner').hide();
+						}
+						else{
+							grid.find('.wo-corner').css({display:'block',left:Math.min(option.width-17, cell.right+FV), top:cell.bottom+FV});					
+						}
+					}
+				}
+
+				function setFocus(mode){
+					var H  = grid.table.eq(0).outerHeight();
+					var W  = grid.table.eq(0).outerWidth();
+					if(SA){
+						//鼠标单击被遮挡的单元格时候使用===========================
+						if(!mode){
+							var lt = GetCell(SA.t, SA.l);
+							mode = lt.tid==1||lt.tid==3 ? 'H' : 'V';
+						}	
+						//特例,表头================================================
+						var bFixed = false;
+						if(SA.l==0 && SA.r==0){
+							SA.r = grid.colCount-1;
+							if(SA.t==0 && SA.b==0){
+								SA.r = grid.colCount-1;
+								SA.b = grid.rowCount-1;
+							}
+							bFixed = true;
+						}
+						else if(SA.t == 0 && SA.b == 0){
+							SA.t = 1;
+							SA.b = grid.rowCount-1;
+							bFixed = true;
+						}
+						if(bFixed){
+							SA.l = Math.max(1, SA.l);
+							SA.t = Math.max(1, SA.t);
+							SA = GetArea(SA);
+						}
+
+						//选中区域边框================================================
+						var br = GetCell(SA.b, SA.r);
+						var lt = GetCell(SA.t, SA.l);
+						var rb = GetCell(SA.b, SA.r);
+						FC = Me(FC);
+
+						if(mode=='H'){
+							//角点-----------------------------------------------
+							if(option.isCorner){
+								if(br.col > option.fixedLeft){
+									if(br.right < W){
+										setCornerPos(null);
+									}
+									else if(br.row <= option.fixedTop || br.bottom > H){
+										setCornerPos(br);
+									}
+								}
+								else{
+									setCornerPos(SA);
+								}
+							}
+							//选中的边框------------------------------------------
+							if(SA.r < option.fixedLeft){}
+							else if(SA.l > option.fixedLeft){				
+								SA.left= Math.max(lt.left, W);
+								SA.w   = rb.right - SA.left;
+							}
+							else{					
+								SA.left= lt.left;
+								SA.w   = Math.max(W-lt.left-2, rb.right-lt.left);
+							}
+						}
+						else if(mode=='V'){
+							//角点-----------------------------------------------
+							if(option.isCorner){
+								if(br.row > option.fixedTop){
+									if(br.bottom < H){
+										setCornerPos(null);
+									}
+									else if(br.col <= option.fixedLeft || br.right > W){
+										setCornerPos(br);
+									}
+								}
+								else{
+									setCornerPos(SA);
+								}
+							}
+							//选中的边框------------------------------------------
+							if(SA.b <= option.fixedTop){}
+							else if(SA.t > option.fixedTop){				
+								SA.top= Math.max(lt.top, H);
+								SA.h  = rb.bottom - SA.top;
+							}
+							else{				
+								SA.top= lt.top;
+								SA.h  = Math.max(H-lt.top-2, rb.bottom - lt.top);
+							}
+						}
+						var saw = Math.min(SA.w, option.width  - SA.left-17);
+						var sah = Math.min(SA.h, option.height - SA.top -17);
+
+						grid.find('.wo-fs-select').css({'border-right-width':(saw==SA.w?1:0), left:SA.left+FV, top:SA.top+FV, width:saw, height:sah, 'display': (SA.count==1 || SA.h<0||SA.w<0) ? 'none' : 'block'});
+						grid.find('.wo-fs-top'   ).css({'border-right-width':(saw==SA.w?1:0), left:SA.left+FV, top:FV, width:saw, height:grid.hdHeight, 'display': 'block'});
+						grid.find('.wo-fs-left'  ).css({left:FV, top:SA.top+FV,  width:grid.hdWidth, height:sah,  'display': 'block'});
+					}
+
+					//焦点单元格========================================================
+					if(FC.col > option.fixedLeft){
+						FC.left= Math.max(FC.left, W);
+						FC.w   = FC.right - FC.left;
+					}
+					if(FC.row > option.fixedTop){
+						FC.top= Math.max(FC.top, H);
+						FC.h  = FC.bottom - FC.top;
+					}
+
+					var fw = Math.min(FC.w, option.width  - FC.left-17);
+					var fh = Math.min(FC.h, option.height - FC.top -17);
+					grid.find('.wo-fs-cell').css({'border-right-width':(fw==FC.w?2:0), left:FC.left+FV, top:FC.top+FV, width:fw-2, height:fh-2, 'display': (FC.h<0||FC.w<0||FC.row==0||FC.col==0) ? 'none' : 'block'});
+				}
+				//--------------------------------------------------------------------------------------------
+				var onMousedown = function(e){
+					var cell = Me(this);
+					MD_which = e.which;
+					if(e.which==1){
+						return onLbuttonDown(cell, e);
+					}
+					e.stopPropagation();
+				}
+				var onLbuttonDown = function(cell, e){
+					if(cell.is(FC)){
+						edit_start(cell)
+					}
+					onMmCell = FC = cell;
+					SA = GetArea(FC, FC);
+					setFocus();
+				}
+
+				var onMouseup = function(e){
+					MD_which = 0;
+				}
+
+				var onMousemove = function(e){
+					if(MD_which>0 && !onMmCell.is(this)){
+						onMmCell = Me(this);				
+						SA = GetArea(FC, onMmCell);
+						setFocus();
+					}
+					e.stopPropagation();
+				}
+
+				//角点操作================================================================================================
+				var onCornerMousedown = function(e){
+					$('head').append('<style type="text/css" grid="true">*{cursor:crosshair!important}</style>');
+					grid.table.find('>tbody>tr>th,tbody>tr>td').bind('mousemove.corner', onCornerMousemove);
+					grid.bind('mouseup.corner', onCornerMouseup);
+					e.stopPropagation();
+				}
+
+				var onCornerMousemove = function(e){
+					if(!onMmCell.is(this)){
+						var cell = onMmCell = Me(this);	
+						var lm = SD = GetArea(SA);
+						if     (cell.row > lm.b){lm.t=lm.b+1; lm.b=cell.row; lm.o='b';}
+						else if(cell.col < lm.l){lm.r=lm.l-1; lm.l=cell.col; lm.o='l';}
+						else if(cell.col > lm.r){lm.l=lm.r+1; lm.r=cell.col; lm.o='r';}
+						else if(cell.row < lm.t){lm.b=lm.t-1; lm.t=cell.row; lm.o='t';}
+						else if(cell.row < lm.b){             lm.t=cell.row; lm.o='m';}
+						else   {SD = null;grid.find('.wo-fs-corner').hide();}
+						SD = GetArea(lm, null, true);
+						SD.o = lm.o;
+						grid.find('.wo-fs-corner').css({left:SD.left+FV, top:SD.top+FV, width:SD.w, height:SD.h, 'display': SD==null ? 'none' : 'block'});
+					}
+					e.stopPropagation();
+				}
+
+				var onCornerMouseup = function(e){
+					if(SD!=null){
+						var str = [];
+						switch (SD.o){
+							case 'b': for(var c=SD.l;c<=SD.r;c++){str[c]=GetCell(SA.b, c).html();} for(var r=SD.t;r<=SD.b;r++){for(var c=SD.l;c<=SD.r;c++){GetCell(r,c).html(str[c]=strplusplus(str[c], 1))}} break;
+							case 't': for(var c=SD.l;c<=SD.r;c++){str[c]=GetCell(SA.t, c).html();} for(var r=SD.b;r>=SD.t;r--){for(var c=SD.l;c<=SD.r;c++){GetCell(r,c).html(str[c]=strplusplus(str[c],-1))}} break;
+							case 'l': for(var r=SD.t;r<=SD.b;r++){str[r]=GetCell(r, SA.l).html();} for(var r=SD.t;r<=SD.b;r++){for(var c=SD.r;c>=SD.l;c--){GetCell(r,c).html(str[r]=strplusplus(str[r],-1))}} break;
+							case 'r': for(var r=SD.t;r<=SD.b;r++){str[r]=GetCell(r, SA.r).html();} for(var r=SD.t;r<=SD.b;r++){for(var c=SD.l;c<=SD.r;c++){GetCell(r,c).html(str[r]=strplusplus(str[r], 1))}} break;
+							case 'm': for(var r=SD.t;r<=SD.b;r++){for(var c=SD.l;c<=SD.r;c++){GetCell(r,c).empty()}}; break;
+						}
+						//---------------------------------------------
+						if(SD.o=='m'){SA.b = SD.b = onMmCell.row-1;}
+						SA = unionArea(SA, SD); SD = null;
+						setFocus();
+					}
+
+					grid.find('.wo-fs-corner').hide();
+					$('head>style[grid]').remove(); 
+					grid.table.find('>tbody>tr>th,tbody>tr>td').unbind('mousemove.corner');
+					grid.unbind('mouseup.corner');
+					e.stopPropagation();
+				}
+
+				function strplusplus(str, v){
+					return str.replace(/(\d+)$/g,function($0,$1){return parseInt($1)+v;});
+				}
+ 
+				//==========================================================================================================================================
+				var onContextmenu = function(e){
+					var cell = Me(this);
+					if(!inArea(e.pageX - grid.ox, e.pageY - grid.oy , SA)){
+						onMmCell = FC = cell;
+						SA = GetArea(FC, FC);
+						setFocus();
+					}
+ 					grid.find('.wo-ctm').show().css({ left: e.pageX - grid.ox, top: e.pageY - grid.oy});
+ 					return false;
+				}
+
+				var onEditEnd = function(e){
+					console.log('onEditEnd')
+					edit_end($(this), '?index=edit', $(this).parent().attr('data-id'));
+				}
+				
+			   
+			    function GetRowTds(nRow) {
+					return  nRow <= option.fixedTop
+							? grid.table.eq(0).find('tbody>tr').eq(nRow).find('>td').add( grid.table.eq(1).find('tbody>tr').eq(nRow).find('>td') )
+							: grid.table.eq(2).find('tbody>tr').eq(nRow-option.fixedTop-1).find('>td').add( grid.table.eq(3).find('tbody>tr').eq(nRow-option.fixedTop-1).find('>td') );
+				}
+
+			    function copySelectCell(iscut) {
+			    	$('.contextmenu').hide()
+		        	var text = '', rowsp ='';
+					for (var t = SA.t; t <= SA.b; t++) {
+						var tds = GetRowTds(t);
+						var str = '',  colsp = ''; text += rowsp;
+						for (var l = SA.l-1; l < SA.r; l++) {
+							var cell = tds.eq(l);
+							str += colsp + cell.text();
+							colsp = "\t";
+							if(iscut)cell.empty();
+						}
+						text += str;
+						rowsp = "\r\n";
+					}
+		        	return text;
+				}
+
+			    function SetSelectCell(str) {
+			    	$('.contextmenu').hide()
+					for (var t = SA.t; t <= SA.b; t++) {
+						var tds = GetRowTds(t);
+						for (var l = SA.l; l <= SA.r; l++) {
+							tds.eq(l).text(str);
+						}
+					}
+		       }
+			   
+				$('#clear').click(function(e) {SetSelectCell('')});
+				var _objCopy = new Clipboard('#copy,#cut',  {text: function(e){ return copySelectCell(e.id=='cut');} });
+				new Clipboard('#paste', {
+					text: function() {
+						var cpdata  = _objCopy.clipboardAction.text;
+						var cptrs = cpdata.split("\r\n");
+						for(var j = 0; j<cptrs.length; j++){
+							var tds = GetRowTds(SA.t+j);
+							var cptds = cptrs[j].split("\t");
+							for(var i = 0; i<cptds.length; i++){
+								tds.eq(SA.l+i-1).text(cptds[i]);
+							}
+						}
+					}
+				});
+
+			    $.fn.extend({  
+			        AfraResize: function(option) {           
+			            var defaults = {
+							minColWidth : 50, 
+							minRowHeight: 16, 
+							rowHeight   : 32,
+							width       : 1200,
+							height      : 500,
+							fixedTop    : 5,
+							fixedLeft   : 3,
+							data        : {"11":{"id":"11","contract":"","group":"换热器器器器器器器器器器器器器","unit":"乙烯-全密度度度度度度度度度度度度度度","no":"2017R-V278","name":"丁烯-1再沸器","item":"1212-E-1010","spec":"φ273*2591*10","material":"Q345R/10","quantity":"1","_css":""},"12":{"id":"12","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V284","name":"丁烯-1冷却器","item":"1212-E-1011","spec":"φ325*2295*10","material":"Q345R/10","quantity":"1","_css":""},"13":{"id":"13","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V279","name":"己烯-1再沸器","item":"1212-E-1026","spec":"φ500*2440*10","material":"Q345R/10","quantity":"1","_css":""},"14":{"id":"14","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V280","name":"己烯-1冷凝器","item":"1212-E-1028","spec":"φ400*3191*8","material":"Q345R/10","quantity":"1","_css":""},"15":{"id":"15","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V285","name":"己烯-1冷却器","item":"1212-E-1029","spec":"φ400*6650*8","material":"Q345R/10","quantity":"1","_css":""},"16":{"id":"16","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V286","name":"氮气预热器","item":"1212-E-1108","spec":"φ450*2837*10","material":"Q345R/10","quantity":"1","_css":""},"17":{"id":"17","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V281","name":"ICA再沸器","item":"1212-E-1415","spec":"φ219*2191*10","material":"Q345R/10","quantity":"1","_css":""},"18":{"id":"18","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V282","name":"ICA冷凝器","item":"1212-E-1422","spec":"φ400*2470*8","material":"Q345R/10","quantity":"1","_css":""},"19":{"id":"19","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V332","name":"ICA冷却器","item":"1212-E-1423","spec":"φ325*3795*10","material":"Q345D/10","quantity":"1","_css":""},"20":{"id":"20","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V330","name":"乙烯换热器","item":"1212-E-2105A","spec":"φ900*8025*16","material":"Q345R/10","quantity":"1","_css":""},"21":{"id":"21","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V331","name":"乙烯换热器","item":"1212-E-2105B","spec":"φ900*8025*16","material":"Q345R/10","quantity":"1","_css":""},"22":{"id":"22","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V289","name":"乙烯预热器","item":"1212-E-2106","spec":"φ700*3877*12","material":"Q345R/10","quantity":"1","_css":""},"23":{"id":"23","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V333","name":"低压冷却器","item":"1212-E-5217","spec":"φ900*9095*12","material":"Q345R/10","quantity":"1","_css":""},"24":{"id":"24","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V287","name":"氮气后冷器","item":"1212-E-1110","spec":"φ400*5150*8","material":"Q345R/10","quantity":"1","_css":""},"25":{"id":"25","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V288","name":"乙烯进料加热器","item":"1212-E-2001","spec":"φ600*2800*10","material":"Q345R/10","quantity":"1","_css":""},"26":{"id":"26","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V283","name":"闪蒸蒸汽冷凝器","item":"1212-E-9001A","spec":"φ550*1750*8","material":"Q345R/10","quantity":"1","_css":""},"27":{"id":"27","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V334","name":"冷火炬气加热器","item":"1212-E-9310","spec":"φ1700*9166*14","material":"Q345R/S30408","quantity":"1","_css":""},"28":{"id":"28","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V336","name":"再生氮气热交换器","item":"1212-E-2115","spec":"φ700*4995*10","material":"Q345R/Q345E","quantity":"1","_css":""},"29":{"id":"29","contract":"","group":"换热器","unit":"乙烯-全密度","no":"2017R-V335","name":"高压火炬收集罐加热器","item":"1212-E-9302","spec":"φ168*4070*9","material":"Q345R/Q345E","quantity":"1","_css":""},"30":{"id":"30","contract":"","group":"换热器","unit":"乙烯-聚丙烯","no":"2017R-V209","name":"一反开车加热器","item":"12141-E-2003","spec":"φ500*7692","material":"Q345R/10#","quantity":"1","_css":""},"31":{"id":"31","contract":"\n","group":"换热器","unit":"乙烯-聚丙烯","no":"2017R-V210","name":"一反开车加热器","item":"12142-E-2003","spec":"φ500*7692","material":"Q345R/10#","quantity":"1","_css":"background-color:rgb(153,153,102);color:rgb(255,0,51);"},"32":{"id":"32","contract":"\n","group":"换热器","unit":"乙烯-聚丙烯","no":"2017R-V213","name":"丙烯过热器","item":"12141-E-2403","spec":"φ325*3252","material":"Q345D/10#","quantity":"1","_css":""},"33":{"id":"33","contract":"\n","group":"换热器","unit":"乙烯-聚丙烯","no":"2017R-V214","name":"丙烯过热器","item":"12142-E-2403","spec":"φ325*3252","material":"Q345D/10#","quantity":"1","_css":""},"34":{"id":"34","contract":"\n","group":"换热器","unit":"乙烯-聚丙烯","no":"2017R-V211","name":"二反开车加热器","item":"12141-E-2503","spec":"φ500*7692","material":"Q345R/10#","quantity":"1","_css":""},"35":{"id":"35","contract":"","group":"换热器","unit":"乙烯-聚丙烯","no":"2017R-V212","name":"二反开车加热器","item":"12142-E-2503","spec":"φ500*7692","material":"Q345R/10#","quantity":"1","_css":""},"36":{"id":"36","contract":"\n","group":"换热器","unit":"乙烯-聚丙烯","no":"2017R-V215","name":"蒸汽冷凝器","item":"12141-E-9101","spec":"φ500*3738","material":"Q345R/10#","quantity":"1","_css":""},"41":{"id":"41","contract":"","group":"换热器","unit":"乙烯-化工罐区","no":"2017F-V276","name":"蒸汽冷凝器","item":"1422-E-1401","spec":"1200*1500","material":"CS/CS","quantity":"1","_css":""},"42":{"id":"42","contract":"","group":"换热器","unit":"乙烯-化工罐区","no":"2017F-V277","name":"蒸汽冷凝器","item":"1423-E-0115","spec":"700*1200","material":"CS/CS","quantity":"1","_css":""},"43":{"id":"43","contract":"","group":"换热器","unit":"乙烯-化工罐区","no":"2017R-V361","name":"苯乙烯/乙二醇水溶液换热器","item":"1421-E-0501","spec":"400*6000","material":"CS/CS","quantity":"1","_css":""},"100":{"id":"100","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V338","name":"进料预热器","item":"1204-E-0201","spec":"φ500×6888","material":"Q345R/Q345R","quantity":"1","_css":""},"101":{"id":"101","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V339","name":"一段冷却器","item":"1204-E-0202","spec":"φ1100×7860","material":"Q345R/Q345R","quantity":"1","_css":""},"102":{"id":"102","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V340","name":"二段冷却器","item":"1204-E-0203","spec":"φ900×7594","material":"Q345R/Q345R","quantity":"1","_css":""},"103":{"id":"103","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V341","name":"塔外换热器","item":"1204-E-0204A","spec":"φ600×7008","material":"Q345R/Q345R","quantity":"1","_css":""},"104":{"id":"104","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V342","name":"塔外换热器","item":"1204-E-0204B","spec":"φ600×7008","material":"Q345R/Q345R","quantity":"1","_css":""},"105":{"id":"105","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V343","name":"MTBE再沸器","item":"1204-E-0205","spec":"φ1000×7580","material":"Q345R/Q345R","quantity":"1","_css":""},"106":{"id":"106","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V344","name":"产品冷却器","item":"1204-E-0206","spec":"φ700×7019","material":"Q345R/Q345R","quantity":"1","_css":""},"107":{"id":"107","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V345","name":"催化蒸馏塔冷凝器","item":"1204-E-0207","spec":"φ900×7594","material":"Q345R/Q345R","quantity":"1","_css":""},"108":{"id":"108","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V346","name":"水洗塔进料冷却器","item":"1204-E-0301","spec":"φ600×7128","material":"Q345R/Q345R","quantity":"1","_css":""},"109":{"id":"109","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V347","name":"萃取水冷却器","item":"1204-E-0302","spec":"φ500×7078","material":"Q345R/Q345R","quantity":"1","_css":""},"110":{"id":"110","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V348","name":"釜液换热器","item":"1204-E-0303A","spec":"φ400×6867","material":"Q345R/Q345R","quantity":"1","_css":""},"111":{"id":"111","contract":"\n","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V349","name":"釜液换热器","item":"1204-E-0303B","spec":"φ400×6867","material":"Q345R/Q345R","quantity":"1","_css":""},"112":{"id":"112","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V350","name":"甲醇回收塔再沸器","item":"1204-E-0304","spec":"φ700×7224","material":"Q345R/Q345R","quantity":"1","_css":""},"113":{"id":"113","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V351","name":"甲醇回收塔冷凝器","item":"1204-E-0306","spec":"φ700×7019","material":"Q345R/Q345R","quantity":"1","_css":""},"114":{"id":"114","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V352","name":"脱异丁烷塔顶冷凝器","item":"1204-E-0402","spec":"φ1400×7920","material":"Q345R/Q345R","quantity":"1","_css":""},"115":{"id":"115","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V353","name":"脱异丁烷塔底蒸汽再沸器","item":"1204-E-0403","spec":"φ800×6019","material":"Q345R/Q345R","quantity":"1","_css":""},"116":{"id":"116","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V354","name":"脱异丁烷塔底凝液再沸器","item":"1204-E-0404","spec":"φ800×6039","material":"Q345R/Q345R","quantity":"1","_css":""},"117":{"id":"117","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V355","name":"丁烯-1精馏塔底再沸器","item":"1204-E-0405","spec":"φ1300×6598","material":"Q345R/Q345R","quantity":"1","_css":""},"118":{"id":"118","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V356","name":"剩余碳四冷却器","item":"1204-E-0406","spec":"φ400×5428","material":"Q345R/Q345R","quantity":"1","_css":""},"119":{"id":"119","contract":"","group":"换热器","unit":"乙烯-MTBE\\丁烯-1","no":"2017R-V357","name":"丁烯-1精馏塔顶冷凝器","item":"1204-E-0407","spec":"φ1200×7946","material":"Q345R/Q345R","quantity":"1","_css":""},"164":{"id":"164","contract":"","group":"换热器","unit":"乙烯-HDPE","no":"2017R-V358","name":"反应器开车加热器","item":"1213-E-3003","spec":"1000*3002","material":"Q345R","quantity":"1","_css":""},"165":{"id":"165","contract":"","group":"换热器","unit":"乙烯-HDPE","no":"2017R-V275","name":"中间处理洗涤塔冷凝器","item":"1213-E-3005","spec":"Φ1300x6000x12","material":"Q345R","quantity":"1","_css":""},"166":{"id":"166","contract":"","group":"换热器","unit":"乙烯-HDPE","no":"2017R-V360","name":"高压闪蒸冷凝器","item":"1213-E-5001","spec":"Ф1100×13983×16","material":"Q345R","quantity":"1","_css":""},"167":{"id":"167","contract":"","group":"换热器","unit":"乙烯-HDPE","no":"2017R-V359","name":"重溶剂冷却器","item":"1213-E-5003","spec":"3945xφ300","material":"Q345R","quantity":"1","_css":""},"168":{"id":"168","contract":"","group":"换热器","unit":"乙烯-HDPE","no":"2017R-V274","name":"换热器","item":"1213-E-5004","spec":"Ф1200×4164","material":"Q345R","quantity":"1","_css":""},"169":{"id":"169","contract":"","group":"换热器","unit":"乙烯-HDPE","no":"2017R-V273","name":"再沸器","item":"1213-E-5009","spec":"Ф1700×16×4482","material":"Q345R","quantity":"1","_css":""},"170":{"id":"170","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V271","name":"1#醚化反应器进料预热器","item":"1132-E-0201","spec":"DN600*6000","material":"Q345R/10","quantity":"1","_css":""},"171":{"id":"171","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V270","name":"1#醚化反应器进料加热器","item":"1132-E-0202","spec":"DN700*6000","material":"Q345R/10","quantity":"1","_css":""},"172":{"id":"172","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V269","name":"醚化产品冷却器","item":"1132-E-0203","spec":"DN600*6000","material":"Q345R/10","quantity":"1","_css":""},"173":{"id":"173","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V267","name":"催化精馏塔进料/产品换热器","item":"1132-E-0205","spec":"DN600*6000","material":"Q345R/10","quantity":"1","_css":""},"174":{"id":"174","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V268","name":"2#醚化反应进料冷却器","item":"1132-E-0204","spec":"DN1200*6000","material":"Q345R/10","quantity":"1","_css":""},"175":{"id":"175","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V264","name":"催化蒸馏上塔塔顶后冷器","item":"1132-E-0208","spec":"DN600*6000","material":"Q345R/10","quantity":"1","_css":""},"176":{"id":"176","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V263","name":"3#醚化反应器进料加热器","item":"1132-E-0209","spec":"DN600*6000","material":"Q345R/10","quantity":"1","_css":""},"177":{"id":"177","contract":"\n","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V261","name":"剩余碳五冷却器","item":"1132-E-0210A","spec":"DN500*6000","material":"Q345R/10","quantity":"1","_css":""},"178":{"id":"178","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V262","name":"剩余碳五冷却器","item":"1132-E-0210B","spec":"DN500*6000","material":"Q345R/10","quantity":"1","_css":""},"179":{"id":"179","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V259","name":"萃取水冷却器","item":"1132-E-0301A","spec":"DN450*6000","material":"Q345R/10","quantity":"1","_css":""},"180":{"id":"180","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V260","name":"萃取水冷却器","item":"1132-E-0301B","spec":"DN450*6000","material":"Q345R/10","quantity":"1","_css":""},"181":{"id":"181","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V256让他","name":"甲醇回收塔顶后让他冷器","item":"1132-E-0304","spec":"DN325*让他600","material":"Q345R/10","quantity":"1","_css":""},"182":{"id":"182","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V266","name":"催化蒸馏下塔再沸器","item":"1132-E-0206","spec":"DN1200*6000","material":"Q345R/10","quantity":"1","_css":""},"183":{"id":"183","contract":"\n","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V265","name":"催化蒸馏上塔再沸器","item":"1132-E-0207","spec":"DN700*6000","material":"Q345R/10","quantity":"1","_css":""},"184":{"id":"184","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V258","name":"甲醇回收塔进料/萃取水换热器","item":"1132-E-0302","spec":"DN600*6000","material":"Q345R/10","quantity":"1","_css":""},"185":{"id":"185","contract":"","group":"换热器","unit":"炼油-轻汽油醚化","no":"2017R-V257","name":"甲醇回收塔再沸器","item":"1132-E-0303","spec":"DN600*6000","material":"Q345R/10","quantity":"1","_css":""},"186":{"id":"186","contract":"","group":"换热器","unit":"炼油-催化汽油加氢装置","no":"2017R-V365","name":"分馏塔顶气体冷却器","item":"1131-E-0104","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"187":{"id":"187","contract":"","group":"换热器","unit":"炼油-催化汽油加氢装置","no":"2017R-V366","name":"轻汽油产品后冷器","item":"1131-E-0105A","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"188":{"id":"188","contract":"","group":"换热器","unit":"炼油-催化汽油加氢装置","no":"2017R-V367","name":"轻汽油产品后冷器","item":"1131-E-0105B","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"189":{"id":"189","contract":"","group":"换热器","unit":"炼油-催化汽油加氢装置","no":"2017R-V368","name":"稳定塔进料/稳定塔底油换热器","item":"1131-E-0203A","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"190":{"id":"190","contract":"\n","group":"换热器","unit":"炼油-催化汽油加氢装置","no":"2017R-V369","name":"稳定塔进料/稳定塔底油换热器","item":"1131-E-0203B","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"191":{"id":"191","contract":"\n","group":"换热器","unit":"炼油-催化汽油加氢装置","no":"2017R-V370","name":"稳定塔顶气体冷却器","item":"1131-E-0204","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"192":{"id":"192","contract":"\n","group":"换热器","unit":"炼油-催化汽油加氢装置","no":"2017R-V371","name":"重汽油产品后冷器","item":"1131-E-0206A","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"193":{"id":"193","contract":"\n","group":"换热器","unit":"炼油-催化汽油加氢装置","no":"2017R-V372","name":"重汽油产品后冷器","item":"1131-E-0206B","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"194":{"id":"194","contract":"","group":"换热器","unit":"炼油-催化汽油加氢装置","no":"2017R-V373","name":"重汽油产品/低温热水换热器","item":"1131-E-0207","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"195":{"id":"195","contract":"","group":"换热器","unit":"炼油-催化汽油加氢装置","no":"2017R-V374","name":"污油冷却器","item":"1131-E-0401","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"196":{"id":"196","contract":"","group":"换热器","unit":"炼油-航煤加氢精制装置","no":"2017R-V375","name":"污油冷却器","item":"1133-E-0105","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"197":{"id":"197","contract":"","group":"换热器","unit":"炼油-航煤加氢精制装置","no":"2017R-V376","name":"分馏塔顶后冷器","item":"1133-E-0202","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"198":{"id":"198","contract":"","group":"换热器","unit":"炼油-航煤加氢精制装置","no":"2017R-V377","name":"精制航煤-分离塔进料换热器","item":"1133-E-0203A","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"199":{"id":"199","contract":"","group":"换热器","unit":"炼油-航煤加氢精制装置","no":"2017R-V378","name":"精制航煤-分离塔进料换热器","item":"1133-E-0203B","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"200":{"id":"200","contract":"","group":"换热器","unit":"炼油-航煤加氢精制装置","no":"2017R-V379","name":"精制航煤后冷器","item":"1133-E-0205","spec":"/","material":"Q345R/10","quantity":"1","_css":""},"201":{"id":"201","contract":"","group":"换热器","unit":"炼油-航煤加氢精制装置","no":"2017R-V380","name":"低温热水-精制航煤换热器","item":"1133-E-0206","spec":"/","material":"Q345R/10","quantity":"1","_css":""}},
+
+							//contextdata : null,
+							contextdata : {copy:'拷贝', paste:'粘贴', cut:'剪切', clear:'删除'},
+							//events:
+							onDrag:   null,
+							onSize:   null,
+							isCorner: true
+			            }			
+						var option =  $.extend(defaults, option);	
+			            this.each(function() {				
+			             	init(this, option);         
+			            });
+			        }
+			    });			
+			})(jQuery);
+
+			$('.afragrid').AfraResize();
+ 
+		});
+	</script>
+
+
+
+
+</head>
+<body>
+
+
+
+
+<div style="margin:30px;">
+<div class="afragrid"></div>
+</div>
+ 
+ 
+</body>
+</html>
