@@ -1,2 +1,1 @@
-# webexcel
-web excel table
+模拟MS Excel 表格, 主要UI功能得以实现,但是代码仅实现其UI界面,没有优化,较凌乱
